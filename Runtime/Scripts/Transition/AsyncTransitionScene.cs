@@ -3,6 +3,7 @@ namespace AXitUnityTemplate.TransitionScene.Runtime.Scripts.Transition
 {
     using System;
     using UnityEngine;
+    using System.Threading.Tasks;
     using Cysharp.Threading.Tasks;
     using Object = UnityEngine.Object;
     using AXitUnityTemplate.AssetLoader.Runtime.Loader;
@@ -25,15 +26,22 @@ namespace AXitUnityTemplate.TransitionScene.Runtime.Scripts.Transition
 
         private AsyncAnimationScene animationScene;
         private SceneInstance       targetScene;
+#if UNITASK
+        private TaskCompletionSource<GameObject> loadAnimationTaskSource;
+        private Task<GameObject>                 LoadAnimationTask => this.loadAnimationTaskSource?.Task;
+#endif
 
         public async void OpenScene(string sceneName, bool withAnimation = true, bool loadByAddressable = false)
         {
             if (loadByAddressable)
             {
-                // Load scene by addressable
+                // Check load scene by addressable
                 if (this.assetLoader is not AddressableAssetLoader addressableAssetLoader) throw new Exception("Cannot load scene by addressable");
 
 #if UNITASK
+                // Wait load animation
+                if (this.loadAnimationTaskSource != null && !this.LoadAnimationTask.IsCompleted) await this.LoadAnimationTask;
+
                 // Load scene and optionally play open animation
                 var loadSceneTask = addressableAssetLoader.LoadSceneAsync(sceneName, false);
                 await (this.animationScene?.PlayAnimationOpen() ?? UniTask.CompletedTask);
@@ -62,14 +70,37 @@ namespace AXitUnityTemplate.TransitionScene.Runtime.Scripts.Transition
         public async void LoadAnimation<T>(string key, bool loadByAddressable = false) where T : AsyncAnimationScene
         {
 #if UNITASK
-            var animationGameObject = Object.Instantiate(await this.assetLoader.LoadAssetAsync<GameObject>(key).ToUniTask(), this.rootTransitionScene.GetRootTransform());
-            if (animationGameObject.TryGetComponent<T>(out var asyncAnimationScene))
+            // Check load animation
+            if (this.loadAnimationTaskSource != null && !this.LoadAnimationTask.IsCompleted)
             {
-                this.animationScene = asyncAnimationScene;
+                await this.LoadAnimationTask;
+                return;
             }
-            else
+
+            this.loadAnimationTaskSource = new TaskCompletionSource<GameObject>();
+
+            try
             {
-                Debug.LogError($"GameObject loaded with key: {key} does not have component of type {typeof(T)}.");
+                var animationGameObject = await this.assetLoader.LoadAssetAsync<GameObject>(key).ToUniTask();
+        
+                var instantiatedObject = Object.Instantiate(animationGameObject, this.rootTransitionScene.GetRootTransform());
+
+                if (instantiatedObject.TryGetComponent<T>(out var asyncAnimationScene))
+                {
+                    this.animationScene = asyncAnimationScene;
+                }
+                else
+                {
+                    Debug.LogError($"GameObject loaded with key: {key} does not have component of type {typeof(T)}.");
+                    this.animationScene = null;
+                }
+        
+                this.loadAnimationTaskSource.TrySetResult(instantiatedObject);
+            }
+            catch (Exception e)
+            {
+                this.loadAnimationTaskSource.TrySetException(e);
+                Debug.LogError($"Failed to load animation with key {key}: {e.Message}");
             }
 #endif
         }
